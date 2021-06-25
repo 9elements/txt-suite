@@ -1,11 +1,9 @@
-package cbnt
+package bootguard
 
 import (
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -19,13 +17,12 @@ import (
 const (
 	//Supported RSA bit length of Intel TXT/CBnT technology
 	rsaLen2048 = int(2048)
-	rsaLen3072 = int(3072)
 )
 
 // GenRSAKey takes the required keylength, two boolean to decide for KM and BPM key and a path
 // to create a RSA key pair and writes its public and private keys to files.
 func GenRSAKey(len int, password string, kmPubFile, kmPrivFile, bpmPubFile, bpmPrivFile *os.File) error {
-	if len == rsaLen2048 || len == rsaLen3072 {
+	if len == rsaLen2048 {
 		key, err := rsa.GenerateKey(rand.Reader, len)
 		if err != nil {
 			return err
@@ -52,68 +49,15 @@ func GenRSAKey(len int, password string, kmPubFile, kmPrivFile, bpmPubFile, bpmP
 		}
 		return nil
 	}
-	return fmt.Errorf("RSA key length must be 2048 or 3084 Bits, but length is: %d", len)
-}
-
-// GenECCKey takes the required curve, two boolean to decide for KM and BPM key and a path
-// to create a ECDSA key pair and writes its public and private keys to files.
-func GenECCKey(curve int, password string, kmPubFile, kmPrivFile, bpmPubFile, bpmPrivFile *os.File) error {
-	var ellCurve elliptic.Curve
-	switch curve {
-	case 224:
-		ellCurve = elliptic.P224()
-	case 256:
-		ellCurve = elliptic.P256()
-	default:
-		return fmt.Errorf("Selected ECC algorithm not supported")
-	}
-	key, err := ecdsa.GenerateKey(ellCurve, rand.Reader)
-	if err != nil {
-		return err
-	}
-
-	if err := writePrivKeyToFile(key, kmPrivFile, password); err != nil {
-		return err
-	}
-
-	if err := writePubKeyToFile(key.Public(), kmPubFile); err != nil {
-		return err
-	}
-
-	key, err = ecdsa.GenerateKey(ellCurve, rand.Reader)
-	if err != nil {
-		return err
-	}
-
-	if err := writePrivKeyToFile(key, bpmPrivFile, password); err != nil {
-		return err
-	}
-
-	if err := writePubKeyToFile(key.Public(), bpmPubFile); err != nil {
-		return err
-
-	}
-	return nil
+	return fmt.Errorf("RSA key length must be 2048, but length is: %d", len)
 }
 
 func writePrivKeyToFile(k crypto.PrivateKey, f *os.File, password string) error {
 	var key *[]byte
 	b, err := x509.MarshalPKCS8PrivateKey(k)
-	if err != nil {
-		return err
-	}
 	bpemBlock := &pem.Block{
 		Bytes: b,
 	}
-	switch k.(type) {
-	case *rsa.PrivateKey:
-		bpemBlock.Type = "RSA PRIVATE KEY"
-	case *ecdsa.PrivateKey:
-		bpemBlock.Type = "ECDSA PRIVATE KEY"
-	default:
-		return fmt.Errorf("trying to write unknown key type")
-	}
-
 	bpem := pem.EncodeToMemory(bpemBlock)
 	if password != "" {
 		encKey, err := encryptPrivFile(&bpem, password)
@@ -139,14 +83,6 @@ func writePubKeyToFile(k crypto.PublicKey, f *os.File) error {
 	}
 	bpemBlock := &pem.Block{
 		Bytes: b,
-	}
-	switch k.(type) {
-	case *rsa.PublicKey:
-		bpemBlock.Type = "RSA PUBLIC KEY"
-	case *ecdsa.PublicKey:
-		bpemBlock.Type = "ECDSA PUBLIC KEY"
-	default:
-		return fmt.Errorf("trying to write unknown key type")
 	}
 	bpem := pem.EncodeToMemory(bpemBlock)
 	_, err = f.Write(bpem)
@@ -247,4 +183,26 @@ func ReadPubKey(path string) (crypto.PublicKey, error) {
 		raw = rest
 	}
 	return nil, fmt.Errorf("failed to parse public key")
+}
+
+func parsePrivateKey(raw []byte) (crypto.Signer, error) {
+	for {
+		block, rest := pem.Decode(raw)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+			if err == nil {
+				if key, ok := key.(crypto.Signer); ok {
+					return key, nil
+				}
+				return nil, fmt.Errorf("found unknown private key type (%T) in PKCS#8 wrapping", key)
+			}
+			return nil, err
+
+		}
+		raw = rest
+	}
+	return nil, fmt.Errorf("failed to parse private key")
 }
